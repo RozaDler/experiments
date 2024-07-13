@@ -4,6 +4,7 @@ Adapted from kuangliu/pytorch-cifar .
 
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision.models import vit_b_16
 
 
 class BasicBlock(nn.Module):
@@ -117,3 +118,18 @@ def ResNet18(in_channels, num_classes):
 
 def ResNet50(in_channels, num_classes):
     return ResNet(Bottleneck, [3, 4, 6, 3], in_channels=in_channels, num_classes=num_classes)
+
+class VisionTransformer3D(nn.Module):
+    def __init__(self, num_classes):
+        super(VisionTransformer3D, self).__init__()
+        self.vit = vit_b_16(pretrained=False)
+        self.vit.heads.head = nn.Linear(self.vit.heads.head.in_features, num_classes)
+    
+    def forward(self, x):
+        b, c, d, h, w = x.size()
+        x = x.permute(0, 2, 1, 3, 4).contiguous()  # Change shape to (batch, depth, channels, height, width)
+        x = x.view(b * d, c, h, w)  # Merge batch and depth dimensions
+        x = self.vit(x)  # Apply Vision Transformer
+        x = x.view(b, d, -1)  # Restore original batch and depth dimensions
+        x = x.mean(1)  # Average over depth dimension
+        return x

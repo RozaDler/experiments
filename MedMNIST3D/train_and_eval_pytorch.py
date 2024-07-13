@@ -13,25 +13,26 @@ import torch.utils.data as data
 import torchvision.transforms as transforms
 from acsconv.converters import ACSConverter, Conv2_5dConverter, Conv3dConverter
 from medmnist import INFO, Evaluator
-from models import ResNet18, ResNet50
+from models import ResNet18, ResNet50, VisionTransformer3D
 from tensorboardX import SummaryWriter
 from tqdm import trange
 from utils import Transform3D, model_to_syncbn
 
 
 def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pretrained_3d, download, model_flag, as_rgb, shape_transform, model_path, run):
-
-    lr = 0.001
+# Learning rate and scheduoler setup
+    lr = 0.001 if model_flag not in ['vit3d'] else 0.0001
     gamma=0.1
     milestones = [0.5 * num_epochs, 0.75 * num_epochs]
-
+# Dataset Information 
     info = INFO[data_flag]
     task = info['task']
     n_channels = 3 if as_rgb else info['n_channels']
     n_classes = len(info['label'])
 
     DataClass = getattr(medmnist, info['python_class'])
-    
+    #GPU setup
+    #this parses the gpu ids and set the environment variables for CUDA devices 
     str_ids = gpu_ids.split(',')
     gpu_ids = []
     for str_id in str_ids:
@@ -58,7 +59,7 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
     val_dataset = DataClass(split='val', transform=eval_transform, download=download, as_rgb=as_rgb, size=size)
     test_dataset = DataClass(split='test', transform=eval_transform, download=download, as_rgb=as_rgb, size=size)
 
-    
+    #Data Loaders
     train_loader = data.DataLoader(dataset=train_dataset,
                                 batch_size=batch_size,
                                 shuffle=True)
@@ -71,16 +72,19 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
     test_loader = data.DataLoader(dataset=test_dataset,
                                 batch_size=batch_size,
                                 shuffle=False)
-
+    #Model Initialization
     print('==> Building and training model...')
 
     if model_flag == 'resnet18':
         model = ResNet18(in_channels=n_channels, num_classes=n_classes)
     elif model_flag == 'resnet50':
         model = ResNet50(in_channels=n_channels, num_classes=n_classes)
+    elif model_flag == 'vit3d':
+        model = VisionTransformer3D(num_classes=n_classes)
     else:
         raise NotImplementedError
-
+    #convolution conversion - this determines the type of convolution to be used also uses model_to_syncbn to apply sunchronized batch normalization 
+    #Synchronized Batch Normalization (SyncBN) is a type of batch normalization used for multi-GPU training. Standard batch normalization only normalizes the data within each device (GPU). SyncBN normalizes the input within the whole mini-batch.
     if conv=='ACSConv':
         model = model_to_syncbn(ACSConverter(model))
     if conv=='Conv2_5d':
@@ -92,15 +96,16 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
             model = model_to_syncbn(Conv3dConverter(model, i3d_repeat_axis=None))
     
     model = model.to(device)
-
+ #Evaluators
     train_evaluator = medmnist.Evaluator(data_flag, 'train', size=size)
     val_evaluator = medmnist.Evaluator(data_flag, 'val', size=size)
     test_evaluator = medmnist.Evaluator(data_flag, 'test', size=size)
-
+# loss function
     criterion = nn.CrossEntropyLoss()
-
+# model loading
     if model_path is not None:
         model.load_state_dict(torch.load(model_path, map_location=device)['net'], strict=True)
+         #that was loading pre-trained model which is if a model path is prvioded, the models state directory is loaded 
         train_metrics = test(model, train_evaluator, train_loader_at_eval, criterion, device, run, output_root)
         val_metrics = test(model, val_evaluator, val_loader, criterion, device, run, output_root)
         test_metrics = test(model, test_evaluator, test_loader, criterion, device, run, output_root)
@@ -112,10 +117,12 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
     if num_epochs == 0:
         return
 
-
+#optimizer and scheduler 
+# the scheduler lowers the learning rate by the gamma at the specified milestone indicated above
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
-    
+     #logging setup 
+    # this sets up log keys for train,val and test metrics also initializes a tensorboard writer for logging metrics
     logs = ['loss', 'auc', 'acc']
     train_logs = ['train_'+log for log in logs]
     val_logs = ['val_'+log for log in logs]
@@ -123,7 +130,8 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
     log_dict = OrderedDict.fromkeys(train_logs+val_logs+test_logs, 0)
     
     writer = SummaryWriter(log_dir=os.path.join(output_root, 'Tensorboard_Results'))
-
+#Training loop
+#this is the training loop, it iterates over the num of epochs  
     best_auc = 0
     best_epoch = 0
     best_model = deepcopy(model)
@@ -132,15 +140,16 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
     iteration = 0
 
     for epoch in trange(num_epochs):
-        
+         #training calls 'train' functiom for a trainin epoch
+        #evaluation evaluates teh model on training validation and test sets 
         train_loss = train(model, train_loader, criterion, optimizer, device, writer)
         
         train_metrics = test(model, train_evaluator, train_loader_at_eval, criterion, device, run)
         val_metrics = test(model, val_evaluator, val_loader, criterion, device, run)
         test_metrics = test(model, test_evaluator, test_loader, criterion, device, run)
-        
+        #scheduler adjusts the learning rate according to how teh scheduler was specififed 
         scheduler.step()
-        
+        #this loggis is what logss the metrics to tensorboard 
         for i, key in enumerate(train_logs):
             log_dict[key] = train_metrics[i]
         for i, key in enumerate(val_logs):
@@ -150,7 +159,7 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
 
         for key, value in log_dict.items():
             writer.add_scalar(key, value, epoch)
-            
+        #best model tracks the best model based on validation AUC and saves it in state
         cur_auc = val_metrics[1]
         if cur_auc > best_auc:
             best_epoch = epoch
@@ -166,7 +175,8 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
 
     path = os.path.join(output_root, 'best_model.pth')
     torch.save(state, path)
-
+    # final evaluation and logging 
+    #this evaluates the best model we saved during training (checkpoints?) and evaluates the model
     train_metrics = test(best_model, train_evaluator, train_loader_at_eval, criterion, device, run, output_root)
     val_metrics = test(best_model, val_evaluator, val_loader, criterion, device, run, output_root)
     test_metrics = test(best_model, test_evaluator, test_loader, criterion, device, run, output_root)
@@ -177,12 +187,18 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, conv, pr
 
     log = '%s\n' % (data_flag) + train_log + val_log + test_log + '\n'
     print(log)
-    
+     #loggs the final results and saves them on a text file
     with open(os.path.join(output_root, '%s_log.txt' % (data_flag)), 'a') as f:
         f.write(log)        
             
     writer.close()
-
+#training function 
+#training loop iterates over the training data
+#forward pass computes the model ouputs 
+#loss calculation computes the loss function 
+#backward bass backpropagates teh loss
+# optimizer step updates the model parameters
+# logging logs te loss to tensorboard 
 
 def train(model, train_loader, criterion, optimizer, device, writer):
     total_loss = []
@@ -206,7 +222,9 @@ def train(model, train_loader, criterion, optimizer, device, writer):
     epoch_loss = sum(total_loss)/len(total_loss)
     return epoch_loss
 
-
+#Test function 
+# testing loop iterates over the evaluation data without gradient computation
+# forward pass, loss calc and metric calculations (AUC and ACC) then logging the mtrics 
 def test(model, evaluator, data_loader, criterion, device, run, save_folder=None):
 
     model.eval()
@@ -235,7 +253,7 @@ def test(model, evaluator, data_loader, criterion, device, run, save_folder=None
 
         return [test_loss, auc, acc]
 
-
+#argument passing: parser.add_argument defines all the Command line arguments that teh script can accept 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='RUN Baseline model of MedMNIST3D')
@@ -282,7 +300,7 @@ if __name__ == '__main__':
                         type=str)
     parser.add_argument('--model_flag',
                         default='resnet18',
-                        help='choose backbone, resnet18/resnet50',
+                        help='choose backbone, resnet18/resnet50/vit3d',
                         type=str)
     parser.add_argument('--run',
                         default='model1',

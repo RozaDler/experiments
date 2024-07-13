@@ -4,6 +4,7 @@ Adapted from kuangliu/pytorch-cifar .
 
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision.models import vit_b_16 
 
 
 class BasicBlock(nn.Module):
@@ -107,3 +108,9 @@ def ResNet18(in_channels, num_classes):
 
 def ResNet50(in_channels, num_classes):
     return ResNet(Bottleneck, [3, 4, 6, 3], in_channels=in_channels, num_classes=num_classes)
+
+ # this function is for vit_b_16
+def VisionTransformer(num_classes):
+    model = vit_b_16(pretrained=False)
+    model.heads.head = nn.Linear(model.heads.head.in_features, num_classes)
+    return model 

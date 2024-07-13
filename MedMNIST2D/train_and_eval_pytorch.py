@@ -13,15 +13,15 @@ import torch.optim as optim
 import torch.utils.data as data
 import torchvision.transforms as transforms
 from medmnist import INFO, Evaluator
-from models import ResNet18, ResNet50
+from models import ResNet18, ResNet50, VisionTransformer
 from tensorboardX import SummaryWriter
-from torchvision.models import resnet18, resnet50
+from torchvision.models import resnet18, resnet50, vit_b_16
 from tqdm import trange
 
 
 def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, download, model_flag, resize, as_rgb, model_path, run):
 
-    lr = 0.001
+    lr = 0.001 if model_flag not in ['vit'] else 0.0001 
     gamma=0.1
     milestones = [0.5 * num_epochs, 0.75 * num_epochs]
 
@@ -84,6 +84,8 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, download
         model =  resnet18(pretrained=False, num_classes=n_classes) if resize else ResNet18(in_channels=n_channels, num_classes=n_classes)
     elif model_flag == 'resnet50':
         model =  resnet50(pretrained=False, num_classes=n_classes) if resize else ResNet50(in_channels=n_channels, num_classes=n_classes)
+    elif model_flag == 'vit':  # Add this block for Vision Transformer
+        model = VisionTransformer(num_classes=n_classes)
     else:
         raise NotImplementedError
 
@@ -280,7 +282,7 @@ if __name__ == '__main__':
                         type=str)
     parser.add_argument('--model_flag',
                         default='resnet18',
-                        help='choose backbone from resnet18, resnet50',
+                        help='choose backbone from resnet18, resnet50, vit',
                         type=str)
     parser.add_argument('--run',
                         default='model1',
