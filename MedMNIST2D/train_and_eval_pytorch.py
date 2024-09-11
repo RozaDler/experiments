@@ -17,9 +17,30 @@ from models import ResNet18, ResNet50, VisionTransformer
 from tensorboardX import SummaryWriter
 from torchvision.models import resnet18, resnet50, vit_b_16
 from tqdm import trange
+import wandb
 
 
 def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, download, model_flag, resize, as_rgb, model_path, run):
+    # wandb.login(key="2034da31c29a117a10e74550ff9896c178344596", relogin=True)
+
+    # Create a custom config dictionary
+    config = {
+        "dataset": args.data_flag,
+        "model": args.model_flag,
+        "epochs": args.num_epochs,
+        "batch_size": args.batch_size,
+        "learning_rate": args.lr,
+        "pretrained": args.pretrained,
+        "resize": args.resize
+    }
+    wandb_run_name = f"{args.data_flag}, Baseline, {args.model_flag}, epochs {args.num_epochs}, BS {args.batch_size}, LR {args.lr}, {args.size}"
+        # Initialize W&B with the custom config
+    wandb.init(project="medMnist-experiments", 
+               entity="rozadler-rd-university-of-surrey", 
+               config=config, 
+               name=wandb_run_name,
+               settings=wandb.Settings(symlink=False)
+               ) #potentially add settings=wandb.Settings(symlink=False)
 
     lr = 0.001 if model_flag not in ['vit'] else 0.0001 
     gamma=0.1
@@ -139,6 +160,22 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, download
         test_metrics = test(model, test_evaluator, test_loader, task, criterion, device, run)
         
         scheduler.step()
+
+        # Log training metrics
+        wandb.log({
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "train_auc": train_metrics[1],
+            "train_accuracy": train_metrics[2]
+        })
+        
+        # Log validation metrics
+        wandb.log({
+            "epoch": epoch,
+            "val_loss": val_metrics[0],
+            "val_auc": val_metrics[1],
+            "val_accuracy": val_metrics[2]
+        })
         
         for i, key in enumerate(train_logs):
             log_dict[key] = train_metrics[i]
@@ -157,6 +194,10 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, download
             best_model = deepcopy(model)
             print('cur_best_auc:', best_auc)
             print('cur_best_epoch', best_epoch)
+      
+      # Final best model logging (after training completes)
+    wandb.log({"best_auc": best_auc, "best_epoch": best_epoch})
+    wandb.finish()
 
     state = {
         'net': best_model.state_dict(),
@@ -184,6 +225,8 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size, size, download
 
 def train(model, train_loader, task, criterion, optimizer, device, writer):
     total_loss = []
+    correct = 0
+    total = 0
     global iteration
 
     model.train()
@@ -192,13 +235,24 @@ def train(model, train_loader, task, criterion, optimizer, device, writer):
         outputs = model(inputs.to(device))
 
         if task == 'multi-label, binary-class':
+            # targets = targets.to(torch.float32).to(device)real
+            # loss = criterion(outputs, targets)
             targets = targets.to(torch.float32).to(device)
             loss = criterion(outputs, targets)
+            predicted = torch.sigmoid(outputs).round()
         else:
+            # targets = torch.squeeze(targets, 1).long().to(device) real
+            # loss = criterion(outputs, targets)
             targets = torch.squeeze(targets, 1).long().to(device)
             loss = criterion(outputs, targets)
+            _, predicted = torch.max(outputs, 1)
 
         total_loss.append(loss.item())
+        #added these two for wandb
+        correct += (predicted == targets).sum().item()
+        total += targets.size(0)
+          # Log training loss to wandb
+        wandb.log({"train_loss": loss.item(), "iteration": iteration})
         writer.add_scalar('train_loss_logs', loss.item(), iteration)
         iteration += 1
 
@@ -206,7 +260,8 @@ def train(model, train_loader, task, criterion, optimizer, device, writer):
         optimizer.step()
     
     epoch_loss = sum(total_loss)/len(total_loss)
-    return epoch_loss
+    epoch_acc = correct / total  # Calculate accuracy for the epoch
+    return epoch_loss, epoch_acc
 
 
 def test(model, evaluator, data_loader, task, criterion, device, run, save_folder=None):
@@ -239,7 +294,8 @@ def test(model, evaluator, data_loader, task, criterion, device, run, save_folde
         auc, acc = evaluator.evaluate(y_score, save_folder, run)
         
         test_loss = sum(total_loss) / len(total_loss)
-
+        # Log test metrics to wandb
+        wandb.log({"test_loss": test_loss, "test_auc": auc, "test_accuracy": accuracy})
         return [test_loss, auc, acc]
 
 
